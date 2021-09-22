@@ -156,40 +156,26 @@ class SpotPerpetualArbitrageStrategy(StrategyPyBase):
         arbitrage.
         """
         execute_arb = False
-        funding_msg = ""
+     
         await self.current_proposal.proposed_spot_deriv_arb()
         if len(self.deriv_position) > 0 and self.should_alternate_proposal_sides(self.current_proposal, self.deriv_position):
             self.current_proposal.alternate_proposal_sides()
 
-        if self.current_proposal.is_funding_payment_time():
-            if len(self.deriv_position) > 0:
-                if self._maximize_funding_rate:
-                    execute_arb = not self.would_receive_funding_payment(self.deriv_position)
-                    if execute_arb:
-                        funding_msg = "Time for funding payment, executing second arbitrage to prevent paying funding fee"
-                    else:
-                        funding_msg = "Waiting for funding payment."
-                else:
-                    funding_msg = "Time for funding payment, executing second arbitrage " \
-                                  "immediately since we don't intend to maximize funding rate"
-                    execute_arb = True
-            else:
-                funding_msg = "Funding payment time, not looking for arbitrage opportunity because prices should be converging now!"
+        
+        
+        if len(self.deriv_position) > 0:
+            execute_arb = self.ready_for_execution(self.current_proposal, False)
         else:
-            if len(self.deriv_position) > 0:
-                execute_arb = self.ready_for_execution(self.current_proposal, False)
-            else:
-                execute_arb = self.ready_for_execution(self.current_proposal, True)
+            execute_arb = self.ready_for_execution(self.current_proposal, True)
 
         if execute_arb:
             self.logger().info(self.spread_msg())
             self.apply_slippage_buffers(self.current_proposal)
             self.apply_budget_constraint(self.current_proposal)
-            await self.execute_arb_proposals(self.current_proposal, funding_msg)
+            await self.execute_arb_proposals(self.current_proposal)
         else:
-            if funding_msg:
-                self.timed_logger(timestamp, funding_msg)
-            elif self._next_arbitrage_cycle_time > time.time():
+            
+            if self._next_arbitrage_cycle_time > time.time():
                 self.timed_logger(timestamp, "Cooling off...")
             else:
                 self.timed_logger(timestamp, self.spread_msg())
@@ -231,17 +217,7 @@ class SpotPerpetualArbitrageStrategy(StrategyPyBase):
             return True
         return False
 
-    def would_receive_funding_payment(self, active_position: List[Position]):
-        """
-        Checks if an active position would receive funding payment.
-        :param active_position: information about active position for the derivative connector
-        :return: True if funding payment would be received, else, False
-        """
-        funding_info: FundingInfo = self._derivative_market_info.market.get_funding_info(
-            self._derivative_market_info.trading_pair)
-        if (active_position[0].amount > 0 > funding_info.rate) or (active_position[0].amount < 0 < funding_info.rate):
-            return True
-        return False
+    
 
     def apply_slippage_buffers(self, arb_proposal: ArbProposal):
         """
@@ -286,7 +262,7 @@ class SpotPerpetualArbitrageStrategy(StrategyPyBase):
                                f"{deriv_token} balance "
                                f"({deriv_token_balance}) is below required order amount ({required_deriv_balance}).")
 
-    async def execute_arb_proposals(self, arb_proposal: ArbProposal, is_funding_msg: str = ""):
+    async def execute_arb_proposals(self, arb_proposal: ArbProposal):
         """
         Execute both sides of the arbitrage trades concurrently.
         :param arb_proposals: the arbitrage proposal
@@ -297,14 +273,12 @@ class SpotPerpetualArbitrageStrategy(StrategyPyBase):
         self._spot_done = False
         self._deriv_done = False
         proposal = self.short_proposal_msg(False)
-        if is_funding_msg:
-            opportunity_msg = is_funding_msg
-        else:
-            first_arbitage = not bool(len(self.deriv_position))
-            opportunity_msg = "Spread wide enough to execute first arbitrage" if first_arbitage else \
-                              "Spread low enough to execute second arbitrage"
-            if not first_arbitage:
-                self._next_arbitrage_cycle_time = time.time() + self._next_arbitrage_cycle_delay
+        
+        first_arbitage = not bool(len(self.deriv_position))
+        opportunity_msg = "Spread wide enough to execute first arbitrage" if first_arbitage else \
+                          "Spread low enough to execute second arbitrage"
+        if not first_arbitage:
+            self._next_arbitrage_cycle_time = time.time() + self._next_arbitrage_cycle_delay
         self.logger().info(f"{opportunity_msg}!: \n"
                            f"{proposal[0]} \n"
                            f"{proposal[1]} \n")
@@ -454,17 +428,7 @@ class SpotPerpetualArbitrageStrategy(StrategyPyBase):
     def did_expire_order(self, expired_event):
         self.retry_order(expired_event)
 
-    def did_complete_funding_payment(self, funding_payment_completed_event):
-        # Excute second arbitrage if necessary (even spread hasn't reached min convergence)
-        if len(self.deriv_position) > 0 and \
-           self._all_markets_ready and \
-           self.current_proposal and \
-           self.ready_for_new_arb_trades():
-            self.apply_slippage_buffers(self.current_proposal)
-            self.apply_budget_constraint(self.current_proposal)
-            funding_msg = "Executing second arbitrage after funding payment is received"
-            safe_ensure_future(self.execute_arb_proposals(self.current_proposal, funding_msg))
-        return
+    
 
     def update_status(self, event):
         order_id = event.order_id
